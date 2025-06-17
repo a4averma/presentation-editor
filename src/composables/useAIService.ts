@@ -14,6 +14,7 @@ export interface SlideContentRequest {
   style: 'professional' | 'creative' | 'minimal' | 'academic'
   includeImages: boolean
   language: string
+  generationMode: 'replace' | 'append' | 'insert'
 }
 
 export interface GeneratedSlideContent {

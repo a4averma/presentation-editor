@@ -132,34 +132,78 @@ export function useSlidesStore() {
       const result = await aiService.generateSlideContent(request)
 
       if (result.success) {
-        // Clear existing slides except the first one
-        slides.value = [slides.value[0]]
-        currentSlideIndex.value = 0
+        const currentIndex = currentSlideIndex.value
+        let insertionIndex = 0
+
+        // Handle different generation modes
+        switch (request.generationMode) {
+          case 'replace':
+            // Clear all slides and replace with generated ones
+            slides.value = []
+            insertionIndex = 0
+            break
+
+          case 'append':
+            // Add to the end of existing slides
+            insertionIndex = slides.value.length
+            break
+
+          case 'insert':
+            // Insert after current slide
+            insertionIndex = currentIndex + 1
+            break
+        }
 
         // Generate slides from AI content
+        const newSlides: Slide[] = []
         result.slides.forEach((content, index) => {
           const slideName = content.title || `AI Generated Slide ${index + 1}`
-          const newSlideId = addSlide(slideName)
-          const slideIndex = slides.value.length - 1
+          const newSlide = createNewSlide(slideName)
 
           // Generate shapes from AI content
           const shapes = aiService.generateShapesFromContent(content)
+          newSlide.shapes = shapes
 
-          // Update the slide with generated shapes
-          updateSlide(slideIndex, { shapes })
+          newSlides.push(newSlide)
         })
 
-        // Go to first generated slide
-        goToSlide(0)
+        // Insert slides at the appropriate position
+        slides.value.splice(insertionIndex, 0, ...newSlides)
 
-        return { success: true, slidesGenerated: result.slides.length }
+        // Update current slide index based on generation mode
+        switch (request.generationMode) {
+          case 'replace':
+            currentSlideIndex.value = 0
+            break
+
+          case 'append':
+            currentSlideIndex.value = insertionIndex
+            break
+
+          case 'insert':
+            currentSlideIndex.value = insertionIndex
+            break
+        }
+
+        // Ensure we have at least one slide
+        if (slides.value.length === 0) {
+          slides.value = [createNewSlide('Slide 1')]
+          currentSlideIndex.value = 0
+        }
+
+        return {
+          success: true,
+          slidesGenerated: result.slides.length,
+          mode: request.generationMode,
+          totalSlides: slides.value.length
+        }
       } else {
         return { success: false, error: result.error }
       }
     } catch (error) {
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Failed to generate slides'
+        error: error instanceof Error ? error.message : 'Failed to generate slides' 
       }
     }
   }
@@ -175,7 +219,8 @@ export function useSlidesStore() {
         slideCount: 1,
         style: 'professional',
         includeImages: false,
-        language: 'en'
+        language: 'en',
+        generationMode: 'replace'
       }
 
       const result = await aiService.generateSlideContent(request)

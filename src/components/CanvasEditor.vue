@@ -442,6 +442,53 @@
             </div>
             
             <div class="form-group">
+              <label class="form-label">Slide Generation Mode</label>
+              <div class="radio-group">
+                <label class="radio-label">
+                  <input 
+                    type="radio" 
+                    v-model="aiRequest.generationMode"
+                    value="replace"
+                    class="radio-input"
+                    :disabled="!slidesStore.aiService.isConfigured()"
+                  />
+                  <span class="radio-text">
+                    <strong>Replace All Slides</strong>
+                    <small>Clear existing slides and create new presentation</small>
+                  </span>
+                </label>
+                
+                <label class="radio-label">
+                  <input 
+                    type="radio" 
+                    v-model="aiRequest.generationMode"
+                    value="append"
+                    class="radio-input"
+                    :disabled="!slidesStore.aiService.isConfigured()"
+                  />
+                  <span class="radio-text">
+                    <strong>Add to End</strong>
+                    <small>Append new slides after existing ones</small>
+                  </span>
+                </label>
+                
+                <label class="radio-label">
+                  <input 
+                    type="radio" 
+                    v-model="aiRequest.generationMode"
+                    value="insert"
+                    class="radio-input"
+                    :disabled="!slidesStore.aiService.isConfigured()"
+                  />
+                  <span class="radio-text">
+                    <strong>Insert After Current</strong>
+                    <small>Insert new slides after the currently selected slide</small>
+                  </span>
+                </label>
+              </div>
+            </div>
+            
+            <div class="form-group">
               <label class="form-label">Language</label>
               <select v-model="aiRequest.language" class="select-input" :disabled="!slidesStore.aiService.isConfigured()">
                 <option value="en">English</option>
@@ -580,7 +627,8 @@ const aiRequest = ref({
   slideCount: 1,
   style: 'professional',
   language: 'en',
-  includeImages: true
+  includeImages: true,
+  generationMode: 'replace'
 })
 
 // Slide enhancement state
@@ -1295,7 +1343,8 @@ function closeAIModal() {
     slideCount: 1,
     style: 'professional',
     language: 'en',
-    includeImages: true
+    includeImages: true,
+    generationMode: 'replace'
   }
 }
 
@@ -1304,12 +1353,18 @@ async function generateSlides() {
     const result = await slidesStore.generateSlidesWithAI(aiRequest.value)
     
     if (result.success) {
-      // Load the first generated slide
+      // Load the current slide
       loadCurrentSlideShapes()
       closeAIModal()
       
-      // Show success notification (you could add a toast system here)
-      console.log(`Successfully generated ${result.slidesGenerated} slides!`)
+      // Show success notification based on generation mode
+      const modeMessage = {
+        replace: `Successfully replaced with ${result.slidesGenerated} AI-generated slides!`,
+        append: `Successfully added ${result.slidesGenerated} slides to the end. Total: ${result.totalSlides} slides.`,
+        insert: `Successfully inserted ${result.slidesGenerated} slides after current slide. Total: ${result.totalSlides} slides.`
+      }
+      
+      console.log(modeMessage[result.mode] || `Successfully generated ${result.slidesGenerated} slides!`)
     } else {
       console.error('Failed to generate slides:', result.error)
       // You could show an error toast here
@@ -2652,5 +2707,78 @@ input[type="range"] {
 
 .checkbox-label:has(.checkbox-input:disabled) .checkbox-text {
   color: #64748b;
+}
+
+/* Radio Button Group Styles */
+.radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.radio-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  cursor: pointer;
+  padding: 16px;
+  border: 2px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fafbfc;
+  transition: all 0.2s ease;
+}
+
+.radio-label:hover:not(:has(.radio-input:disabled)) {
+  border-color: #a855f7;
+  background: #faf5ff;
+}
+
+.radio-label:has(.radio-input:checked) {
+  border-color: #a855f7;
+  background: #faf5ff;
+  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.1);
+}
+
+.radio-label:has(.radio-input:disabled) {
+  background: #f1f5f9;
+  cursor: not-allowed;
+}
+
+.radio-input {
+  width: 20px;
+  height: 20px;
+  accent-color: #a855f7;
+  cursor: pointer;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.radio-input:disabled {
+  cursor: not-allowed;
+}
+
+.radio-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.radio-text strong {
+  font-weight: 600;
+  color: #374151;
+  font-size: 15px;
+}
+
+.radio-text small {
+  font-size: 13px;
+  color: #6b7280;
+  line-height: 1.4;
+}
+
+.radio-label:has(.radio-input:disabled) .radio-text strong,
+.radio-label:has(.radio-input:disabled) .radio-text small {
+  color: #9ca3af;
 }
 </style> 
