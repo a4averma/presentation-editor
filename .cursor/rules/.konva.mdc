@@ -1,0 +1,875 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+Create a presentation maker with konva that has support for shapes using immer js for state management. Below is reference for code
+
+
+// composables/useCanvasStore.js
+import { ref, computed } from 'vue'
+import { produce, enablePatches, applyPatches } from 'immer'
+
+// Enable patches globally
+enablePatches()
+
+export function useCanvasStore() {
+  // Canvas state
+  const state = ref({
+    canvas: {
+      width: 800,
+      height: 600,
+      backgroundColor: '#ffffff'
+    },
+    shapes: [],
+    selectedShapeIds: [],
+    tool: 'select', // select, rectangle, circle, line, pencil
+    style: {
+      fill: '#ff0000',
+      stroke: '#000000',
+      strokeWidth: 2
+    },
+    metadata: {
+      name: 'Untitled Canvas',
+      lastModified: new Date().toISOString(),
+      shapeCount: 0
+    }
+  })
+
+  // Undo/Redo stacks
+  const undoStack = ref([])
+  const redoStack = ref([])
+  const maxHistorySize = ref(50)
+  
+  // Computed properties
+  const canUndo = computed(() => undoStack.value.length > 0)
+  const canRedo = computed(() => redoStack.value.length > 0)
+  const historySize = computed(() => undoStack.value.length)
+  const selectedShapes = computed(() => 
+    state.value.shapes.filter(shape => 
+      state.value.selectedShapeIds.includes(shape.id)
+    )
+  )
+
+  // Helper function to generate unique IDs
+  function generateId() {
+    return `shape_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+  }
+
+  // Helper function to create state snapshot
+  function createSnapshot(updates = {}) {
+    return produce(
+      state.value,
+      draft => {
+        Object.keys(updates).forEach(key => {
+          if (key === 'shapes' && Array.isArray(updates[key])) {
+            draft.shapes = updates[key]
+          } else if (key === 'selectedShapeIds' && Array.isArray(updates[key])) {
+            draft.selectedShapeIds = updates[key]
+          } else if (key === 'canvas' && typeof updates[key] === 'object') {
+            Object.assign(draft.canvas, updates[key])
+          } else if (key === 'style' && typeof updates[key] === 'object') {
+            Object.assign(draft.style, updates[key])
+          } else if (key === 'tool') {
+            draft.tool = updates[key]
+          }
+        })
+        
+        // Update metadata
+        draft.metadata.shapeCount = draft.shapes.length
+        draft.metadata.lastModified = new Date().toISOString()
+      },
+      true // Enable patches
+    )
+  }
+
+  // Update state with history tracking
+  function updateState(updates, options = {}) {
+    const { skipHistory = false, description = 'Canvas update' } = options
+
+    if (skipHistory) {
+      state.value = produce(state.value, draft => {
+        Object.keys(updates).forEach(key => {
+          if (key === 'shapes') draft.shapes = updates[key]
+          else if (key === 'selectedShapeIds') draft.selectedShapeIds = updates[key]
+          else if (key === 'canvas') Object.assign(draft.canvas, updates[key])
+          else if (key === 'style') Object.assign(draft.style, updates[key])
+          else if (key === 'tool') draft.tool = updates[key]
+        })
+        draft.metadata.shapeCount = draft.shapes.length
+        draft.metadata.lastModified = new Date().toISOString()
+      })
+      return
+    }
+
+    const [nextState, patches, inversePatches] = createSnapshot(updates)
+
+    if (patches.length > 0) {
+      undoStack.value.push({
+        patches: inversePatches,
+        timestamp: Date.now(),
+        description
+      })
+
+      if (undoStack.value.length > maxHistorySize.value) {
+        undoStack.value.shift()
+      }
+
+      redoStack.value = []
+      state.value = nextState
+    }
+  }
+
+  // Shape operations
+  function addShape(shapeData) {
+    const shape = {
+      id: generateId(),
+      type: shapeData.type,
+      ...shapeData,
+      createdAt: new Date().toISOString()
+    }
+
+    const newShapes = [...state.value.shapes, shape]
+    updateState({ shapes: newShapes }, { description: `Add ${shape.type}` })
+    return shape.id
+  }
+
+  function updateShape(shapeId, updates) {
+    const newShapes = state.value.shapes.map(shape => 
+      shape.id === shapeId ? { ...shape, ...updates } : shape
+    )
+    updateState({ shapes: newShapes }, { description: 'Update shape' })
+  }
+
+  function deleteShapes(shapeIds = null) {
+    const idsToDelete = shapeIds || state.value.selectedShapeIds
+    if (idsToDelete.length === 0) return
+
+    const newShapes = state.value.shapes.filter(shape => 
+      !idsToDelete.includes(shape.id)
+    )
+    const newSelectedIds = state.value.selectedShapeIds.filter(id => 
+      !idsToDelete.includes(id)
+    )
+
+    updateState({ 
+      shapes: newShapes,
+      selectedShapeIds: newSelectedIds
+    }, { description: `Delete ${idsToDelete.length} shape(s)` })
+  }
+
+  function moveShapes(shapeIds, deltaX, deltaY) {
+    const newShapes = state.value.shapes.map(shape => {
+      if (shapeIds.includes(shape.id)) {
+        return {
+          ...shape,
+          x: (shape.x || 0) + deltaX,
+          y: (shape.y || 0) + deltaY
+        }
+      }
+      return shape
+    })
+    updateState({ shapes: newShapes }, { description: 'Move shapes' })
+  }
+
+  function duplicateShapes(shapeIds = null) {
+    const idsToDuplicate = shapeIds || state.value.selectedShapeIds
+    if (idsToDuplicate.length === 0) return
+
+    const newShapes = [...state.value.shapes]
+    const newSelectedIds = []
+
+    idsToDuplicate.forEach(id => {
+      const originalShape = state.value.shapes.find(s => s.id === id)
+      if (originalShape) {
+        const duplicatedShape = {
+          ...originalShape,
+          id: generateId(),
+          x: (originalShape.x || 0) + 20,
+          y: (originalShape.y || 0) + 20,
+          createdAt: new Date().toISOString()
+        }
+        newShapes.push(duplicatedShape)
+        newSelectedIds.push(duplicatedShape.id)
+      }
+    })
+
+    updateState({ 
+      shapes: newShapes,
+      selectedShapeIds: newSelectedIds
+    }, { description: 'Duplicate shapes' })
+  }
+
+  // Selection operations
+  function selectShapes(shapeIds, addToSelection = false) {
+    const newSelectedIds = addToSelection 
+      ? [...new Set([...state.value.selectedShapeIds, ...shapeIds])]
+      : shapeIds
+
+    updateState({ selectedShapeIds: newSelectedIds }, { skipHistory: true })
+  }
+
+  function clearSelection() {
+    updateState({ selectedShapeIds: [] }, { skipHistory: true })
+  }
+
+  // Tool and style operations
+  function setTool(tool) {
+    updateState({ tool }, { skipHistory: true })
+  }
+
+  function updateStyle(styleUpdates) {
+    updateState({ style: { ...state.value.style, ...styleUpdates } }, { skipHistory: true })
+  }
+
+  // Canvas operations
+  function updateCanvas(canvasUpdates) {
+    updateState({ canvas: canvasUpdates }, { description: 'Update canvas' })
+  }
+
+  function clearCanvas() {
+    updateState({ 
+      shapes: [],
+      selectedShapeIds: []
+    }, { description: 'Clear canvas' })
+  }
+
+  // Undo/Redo functions
+  function undo() {
+    if (!canUndo.value) return false
+
+    const historyItem = undoStack.value.pop()
+    
+    const [nextState, forwardPatches] = produce(
+      state.value,
+      draft => applyPatches(draft, historyItem.patches),
+      true
+    )
+
+    redoStack.value.push({
+      patches: forwardPatches,
+      timestamp: Date.now(),
+      description: 'Redo item'
+    })
+
+    state.value = nextState
+    return true
+  }
+
+  function redo() {
+    if (!canRedo.value) return false
+
+    const redoItem = redoStack.value.pop()
+    
+    const [nextState, inversePatches] = produce(
+      state.value,
+      draft => applyPatches(draft, redoItem.patches),
+      true
+    )
+
+    undoStack.value.push({
+      patches: inversePatches,
+      timestamp: Date.now(),
+      description: 'Undo item'
+    })
+
+    state.value = nextState
+    return true
+  }
+
+  function clearHistory() {
+    undoStack.value = []
+    redoStack.value = []
+  }
+
+  // Batch operations
+  function batch(operations, description = 'Batch operation') {
+    const initialState = state.value
+    let finalState = initialState
+
+    operations.forEach(op => {
+      if (typeof op === 'function') {
+        finalState = produce(finalState, op)
+      }
+    })
+
+    const [nextState, patches, inversePatches] = produce(
+      initialState,
+      () => finalState,
+      true
+    )
+
+    if (patches.length > 0) {
+      undoStack.value.push({
+        patches: inversePatches,
+        timestamp: Date.now(),
+        description
+      })
+
+      if (undoStack.value.length > maxHistorySize.value) {
+        undoStack.value.shift()
+      }
+
+      redoStack.value = []
+      state.value = nextState
+    }
+  }
+
+  // Getters
+  const currentState = computed(() => state.value)
+  const shapes = computed(() => state.value.shapes)
+  const canvas = computed(() => state.value.canvas)
+  const tool = computed(() => state.value.tool)
+  const style = computed(() => state.value.style)
+  const metadata = computed(() => state.value.metadata)
+
+  return {
+    // State
+    currentState,
+    shapes,
+    canvas,
+    tool,
+    style,
+    metadata,
+    selectedShapes,
+
+    // History
+    canUndo,
+    canRedo,
+    historySize,
+
+    // Shape operations
+    addShape,
+    updateShape,
+    deleteShapes,
+    moveShapes,
+    duplicateShapes,
+
+    // Selection
+    selectShapes,
+    clearSelection,
+
+    // Tools and styles
+    setTool,
+    updateStyle,
+
+    // Canvas
+    updateCanvas,
+    clearCanvas,
+
+    // History operations
+    undo,
+    redo,
+    clearHistory,
+    batch,
+
+    // Configuration
+    maxHistorySize
+  }
+}
+
+// Example Vue component with Konva
+/*
+<template>
+  <div class="canvas-editor">
+    <div class="toolbar">
+      <div class="history-controls">
+        <button 
+          @click="store.undo()" 
+          :disabled="!store.canUndo.value"
+          class="btn"
+        >
+          ↶ Undo ({{ store.historySize.value }})
+        </button>
+        <button 
+          @click="store.redo()" 
+          :disabled="!store.canRedo.value"
+          class="btn"
+        >
+          ↷ Redo
+        </button>
+        <button @click="store.clearHistory()" class="btn">
+          Clear History
+        </button>
+      </div>
+
+      <div class="tools">
+        <button 
+          v-for="tool in tools" 
+          :key="tool"
+          @click="store.setTool(tool)"
+          :class="{ active: store.tool.value === tool }"
+          class="btn tool-btn"
+        >
+          {{ tool }}
+        </button>
+      </div>
+
+      <div class="style-controls">
+        <label>
+          Fill: 
+          <input 
+            type="color" 
+            :value="store.style.value.fill"
+            @input="store.updateStyle({ fill: $event.target.value })"
+          />
+        </label>
+        <label>
+          Stroke: 
+          <input 
+            type="color" 
+            :value="store.style.value.stroke"
+            @input="store.updateStyle({ stroke: $event.target.value })"
+          />
+        </label>
+        <label>
+          Width: 
+          <input 
+            type="range" 
+            min="1" 
+            max="20"
+            :value="store.style.value.strokeWidth"
+            @input="store.updateStyle({ strokeWidth: parseInt($event.target.value) })"
+          />
+        </label>
+      </div>
+
+      <div class="canvas-controls">
+        <button @click="store.clearCanvas()" class="btn danger">
+          Clear Canvas
+        </button>
+        <button 
+          @click="duplicateSelected" 
+          :disabled="store.selectedShapes.value.length === 0"
+          class="btn"
+        >
+          Duplicate Selected
+        </button>
+        <button 
+          @click="deleteSelected" 
+          :disabled="store.selectedShapes.value.length === 0"
+          class="btn danger"
+        >
+          Delete Selected
+        </button>
+      </div>
+    </div>
+
+    <div class="canvas-container">
+      <div ref="canvasContainer" class="konva-container"></div>
+    </div>
+
+    <div class="status">
+      <p>Tool: {{ store.tool.value }}</p>
+      <p>Shapes: {{ store.metadata.value.shapeCount }}</p>
+      <p>Selected: {{ store.selectedShapes.value.length }}</p>
+      <p>Canvas: {{ store.canvas.value.name }}</p>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ref, onMounted, onUnmounted, watch } from 'vue'
+import Konva from 'konva'
+import { useCanvasStore } from '@/composables/useCanvasStore'
+
+const store = useCanvasStore()
+const canvasContainer = ref(null)
+const tools = ['select', 'rectangle', 'circle', 'line', 'pencil']
+
+let stage = null
+let layer = null
+let isDrawing = false
+let currentShape = null
+
+onMounted(() => {
+  initKonva()
+  setupKeyboardShortcuts()
+})
+
+onUnmounted(() => {
+  cleanup()
+})
+
+function initKonva() {
+  stage = new Konva.Stage({
+    container: canvasContainer.value,
+    width: store.canvas.value.width,
+    height: store.canvas.value.height
+  })
+
+  layer = new Konva.Layer()
+  stage.add(layer)
+
+  // Event listeners
+  stage.on('mousedown touchstart', handleMouseDown)
+  stage.on('mousemove touchmove', handleMouseMove) 
+  stage.on('mouseup touchend', handleMouseUp)
+  stage.on('click tap', handleClick)
+
+  // Watch for shape changes and redraw
+  watchShapeChanges()
+}
+
+function watchShapeChanges() {
+  watch(() => store.shapes.value, (newShapes) => {
+    redrawCanvas(newShapes)
+  }, { deep: true })
+
+  watch(() => store.selectedShapes.value, (selectedShapes) => {
+    updateSelection(selectedShapes)
+  })
+}
+
+function redrawCanvas(shapes) {
+  layer.destroyChildren()
+  
+  shapes.forEach(shapeData => {
+    let shape
+    
+    switch (shapeData.type) {
+      case 'rectangle':
+        shape = new Konva.Rect({
+          id: shapeData.id,
+          x: shapeData.x,
+          y: shapeData.y,
+          width: shapeData.width,
+          height: shapeData.height,
+          fill: shapeData.fill,
+          stroke: shapeData.stroke,
+          strokeWidth: shapeData.strokeWidth
+        })
+        break
+      
+      case 'circle':
+        shape = new Konva.Circle({
+          id: shapeData.id,
+          x: shapeData.x,
+          y: shapeData.y,
+          radius: shapeData.radius,
+          fill: shapeData.fill,
+          stroke: shapeData.stroke,
+          strokeWidth: shapeData.strokeWidth
+        })
+        break
+      
+      case 'line':
+        shape = new Konva.Line({
+          id: shapeData.id,
+          points: shapeData.points,
+          stroke: shapeData.stroke,
+          strokeWidth: shapeData.strokeWidth,
+          lineCap: 'round',
+          lineJoin: 'round'
+        })
+        break
+    }
+    
+    if (shape) {
+      shape.on('click', () => {
+        if (store.tool.value === 'select') {
+          store.selectShapes([shapeData.id])
+        }
+      })
+      
+      shape.on('dragend', (e) => {
+        store.updateShape(shapeData.id, {
+          x: e.target.x(),
+          y: e.target.y()
+        })
+      })
+      
+      if (store.tool.value === 'select') {
+        shape.draggable(true)
+      }
+      
+      layer.add(shape)
+    }
+  })
+  
+  layer.draw()
+}
+
+function updateSelection(selectedShapes) {
+  layer.children.forEach(shape => {
+    const isSelected = selectedShapes.some(s => s.id === shape.id())
+    shape.stroke(isSelected ? '#0066cc' : shape.attrs.originalStroke || shape.stroke())
+    shape.strokeWidth(isSelected ? 3 : shape.attrs.originalStrokeWidth || shape.strokeWidth())
+  })
+  layer.draw()
+}
+
+function handleMouseDown(e) {
+  if (store.tool.value === 'select') return
+  
+  isDrawing = true
+  const pos = stage.getPointerPosition()
+  const style = store.style.value
+  
+  switch (store.tool.value) {
+    case 'rectangle':
+      currentShape = {
+        type: 'rectangle',
+        x: pos.x,
+        y: pos.y,
+        width: 0,
+        height: 0,
+        fill: style.fill,
+        stroke: style.stroke,
+        strokeWidth: style.strokeWidth
+      }
+      break
+      
+    case 'circle':
+      currentShape = {
+        type: 'circle',
+        x: pos.x,
+        y: pos.y,
+        radius: 0,
+        fill: style.fill,
+        stroke: style.stroke,
+        strokeWidth: style.strokeWidth
+      }
+      break
+      
+    case 'line':
+    case 'pencil':
+      currentShape = {
+        type: 'line',
+        points: [pos.x, pos.y],
+        stroke: style.stroke,
+        strokeWidth: style.strokeWidth
+      }
+      break
+  }
+}
+
+function handleMouseMove(e) {
+  if (!isDrawing || !currentShape) return
+  
+  const pos = stage.getPointerPosition()
+  
+  switch (currentShape.type) {
+    case 'rectangle':
+      currentShape.width = pos.x - currentShape.x
+      currentShape.height = pos.y - currentShape.y
+      break
+      
+    case 'circle':
+      const radius = Math.sqrt(
+        Math.pow(pos.x - currentShape.x, 2) + 
+        Math.pow(pos.y - currentShape.y, 2)
+      )
+      currentShape.radius = radius
+      break
+      
+    case 'line':
+      if (store.tool.value === 'pencil') {
+        currentShape.points.push(pos.x, pos.y)
+      } else {
+        currentShape.points = [currentShape.points[0], currentShape.points[1], pos.x, pos.y]
+      }
+      break
+  }
+  
+  // Temporarily draw current shape
+  redrawWithCurrentShape()
+}
+
+function handleMouseUp() {
+  if (!isDrawing || !currentShape) return
+  
+  isDrawing = false
+  
+  // Add completed shape to store
+  if (isValidShape(currentShape)) {
+    store.addShape(currentShape)
+  }
+  
+  currentShape = null
+}
+
+function handleClick(e) {
+  if (store.tool.value === 'select' && e.target === stage) {
+    store.clearSelection()
+  }
+}
+
+function isValidShape(shape) {
+  switch (shape.type) {
+    case 'rectangle':
+      return Math.abs(shape.width) > 5 && Math.abs(shape.height) > 5
+    case 'circle':
+      return shape.radius > 5
+    case 'line':
+      return shape.points.length >= 4
+    default:
+      return false
+  }
+}
+
+function redrawWithCurrentShape() {
+  redrawCanvas(store.shapes.value)
+  
+  if (currentShape) {
+    let tempShape
+    
+    switch (currentShape.type) {
+      case 'rectangle':
+        tempShape = new Konva.Rect(currentShape)
+        break
+      case 'circle':
+        tempShape = new Konva.Circle(currentShape)
+        break
+      case 'line':
+        tempShape = new Konva.Line(currentShape)
+        break
+    }
+    
+    if (tempShape) {
+      tempShape.opacity(0.7)
+      layer.add(tempShape)
+      layer.draw()
+    }
+  }
+}
+
+function duplicateSelected() {
+  store.duplicateShapes()
+}
+
+function deleteSelected() {
+  store.deleteShapes()
+}
+
+function setupKeyboardShortcuts() {
+  const handleKeydown = (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === 'z' && !event.shiftKey) {
+      event.preventDefault()
+      store.undo()
+    } else if (
+      (event.metaKey || event.ctrlKey) && 
+      (event.key === 'y' || (event.key === 'z' && event.shiftKey))
+    ) {
+      event.preventDefault()
+      store.redo()
+    } else if ((event.metaKey || event.ctrlKey) && event.key === 'd') {
+      event.preventDefault()
+      duplicateSelected()
+    } else if (event.key === 'Delete' || event.key === 'Backspace') {
+      event.preventDefault()
+      deleteSelected()
+    }
+  }
+  
+  document.addEventListener('keydown', handleKeydown)
+  
+  onUnmounted(() => {
+    document.removeEventListener('keydown', handleKeydown)
+  })
+}
+
+function cleanup() {
+  if (stage) {
+    stage.destroy()
+  }
+}
+</script>
+
+<style scoped>
+.canvas-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  padding: 16px;
+  background: #f5f5f5;
+  border-bottom: 1px solid #ddd;
+  align-items: center;
+}
+
+.history-controls, .tools, .style-controls, .canvas-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.btn {
+  padding: 8px 12px;
+  border: 1px solid #ccc;
+  background: white;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn:hover:not(:disabled) {
+  background: #f0f0f0;
+}
+
+.btn.active {
+  background: #007acc;
+  color: white;
+}
+
+.btn.danger {
+  background: #ff4444;
+  color: white;
+}
+
+.canvas-container {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #fafafa;
+}
+
+.konva-container {
+  border: 2px solid #ddd;
+  background: white;
+}
+
+.status {
+  padding: 12px 16px;
+  background: #f9f9f9;
+  border-top: 1px solid #ddd;
+  display: flex;
+  gap: 20px;
+  font-size: 14px;
+}
+
+.status p {
+  margin: 0;
+}
+
+label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 14px;
+}
+
+input[type="color"] {
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+input[type="range"] {
+  width: 80px;
+}
+</style>
+*/
