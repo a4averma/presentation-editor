@@ -1,6 +1,6 @@
 import { ref, computed } from 'vue'
 import type { Shape } from './useCanvasStore'
-import { useAIService, type SlideContentRequest, type GeneratedSlideContent } from './useAIService'
+import { useAIService, type SlideContentRequest } from './useAIService'
 
 export interface Slide {
   id: string
@@ -120,7 +120,7 @@ export function useSlidesStore() {
   }
 
   // Generate thumbnail for a slide
-  function generateThumbnail(slide: Slide): string {
+  function generateThumbnail(): string {
     // This would typically be generated from the canvas
     // For now, return a placeholder or empty string
     return ''
