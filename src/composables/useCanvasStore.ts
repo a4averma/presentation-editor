@@ -35,6 +35,9 @@ export interface Shape {
   isItalic?: boolean
   isStrikethrough?: boolean
   isBullet?: boolean
+  isMath?: boolean
+  mathDisplayMode?: boolean
+  mathImageData?: string
   htmlContent?: string
 }
 

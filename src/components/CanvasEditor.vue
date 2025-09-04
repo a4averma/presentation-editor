@@ -51,7 +51,7 @@
             <input 
               v-model="slide.name"
               @blur="updateSlideName(index, slide.name)"
-              @keyup.enter="$event.target.blur()"
+              @keyup.enter="(e) => (e.target as HTMLInputElement)?.blur()"
               class="slide-name-input"
             />
             <div class="slide-actions">
@@ -285,16 +285,69 @@
           >
             <List :size="16" />
           </button>
+          <button 
+            @click="toggleFormat('math')" 
+            :class="{ active: currentFormat.isMath }"
+            class="format-btn"
+            title="Math Mode (LaTeX)"
+          >
+            <Calculator :size="16" />
+          </button>
+          
+          <!-- Math Mode Options -->
+          <div v-if="currentFormat.isMath" class="math-mode-toggle">
+            <button 
+              @click="currentFormat.mathDisplayMode = true"
+              :class="{ active: currentFormat.mathDisplayMode }"
+              class="format-btn mini-btn"
+              title="Display Math (Block)"
+            >
+              𝒇(𝒙)
+            </button>
+            <button 
+              @click="currentFormat.mathDisplayMode = false"
+              :class="{ active: !currentFormat.mathDisplayMode }"
+              class="format-btn mini-btn"
+              title="Inline Math"
+            >
+              f(x)
+            </button>
+          </div>
         </div>
 
         <div class="text-editor">
           <textarea 
             ref="textAreaRef"
             v-model="editingText"
-            placeholder="Enter your text..."
+            :placeholder="currentFormat.isMath ? (currentFormat.mathDisplayMode ? 'Enter LaTeX math expression... e.g., x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}' : 'Enter inline LaTeX... e.g., \\alpha + \\beta = \\gamma') : 'Enter your text...'"
             rows="6"
             @input="updatePreview"
           ></textarea>
+          <div v-if="currentFormat.isMath" class="math-help">
+            <details>
+              <summary>LaTeX Math Examples</summary>
+              <div class="math-examples">
+                <div class="example">
+                  <code>x^2 + y^2 = r^2</code> → x² + y² = r²
+                </div>
+                <div class="example">
+                  <code>\frac{a}{b}</code> → Fraction a/b
+                </div>
+                <div class="example">
+                  <code>\sqrt{x}</code> → Square root of x
+                </div>
+                <div class="example">
+                  <code>\sum_{i=1}^{n} x_i</code> → Summation
+                </div>
+                <div class="example">
+                  <code>\int_{a}^{b} f(x)dx</code> → Integral
+                </div>
+                <div class="example">
+                  <code>\alpha, \beta, \gamma</code> → Greek letters
+                </div>
+              </div>
+            </details>
+          </div>
         </div>
 
         <div class="text-preview">
@@ -570,6 +623,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
 import Konva from 'konva'
+import katex from 'katex'
 import { useCanvasStore, type Shape } from '../composables/useCanvasStore'
 import { useSlidesStore } from '../composables/useSlidesStore'
 import { 
@@ -594,7 +648,8 @@ import {
   Settings,
   Eye,
   EyeOff,
-  AlertTriangle
+  AlertTriangle,
+  Calculator
 } from 'lucide-vue-next'
 
 const store = useCanvasStore()
@@ -617,7 +672,9 @@ const currentFormat = ref({
   isBold: false,
   isItalic: false,
   isStrikethrough: false,
-  isBullet: false
+  isBullet: false,
+  isMath: false,
+  mathDisplayMode: true
 })
 
 // AI generation state
@@ -625,10 +682,10 @@ const showAIModal = ref(false)
 const aiRequest = ref({
   topic: '',
   slideCount: 1,
-  style: 'professional',
+  style: 'professional' as 'professional' | 'creative' | 'minimal' | 'academic',
   language: 'en',
   includeImages: true,
-  generationMode: 'replace'
+  generationMode: 'replace' as 'replace' | 'append' | 'insert'
 })
 
 // Slide enhancement state
@@ -674,8 +731,8 @@ function initKonva() {
 }
 
 function watchShapeChanges() {
-  watch(() => store.shapes.value, (newShapes) => {
-    redrawCanvas(newShapes)
+  watch(() => store.shapes.value, async (newShapes) => {
+    await redrawCanvas(newShapes)
   }, { deep: true })
 
   watch(() => store.selectedShapes.value, (selectedShapes) => {
@@ -683,22 +740,46 @@ function watchShapeChanges() {
   })
 }
 
-function redrawCanvas(shapes: Shape[]) {
+async function redrawCanvas(shapes: Shape[]) {
   if (!layer) return
   
   layer.destroyChildren()
   
-  shapes.forEach(shapeData => {
+  // Process shapes sequentially to handle async math rendering
+  for (const shapeData of shapes) {
     // Skip invalid shapes
     if (!shapeData || !shapeData.id || !shapeData.type) {
       console.warn('Skipping invalid shape:', shapeData)
-      return
+      continue
     }
     
     // Ensure coordinates are valid numbers
     if (typeof shapeData.x !== 'number' || typeof shapeData.y !== 'number') {
       console.warn('Skipping shape with invalid coordinates:', shapeData)
-      return
+      continue
+    }
+    
+    // Handle math text specially
+    if (shapeData.type === 'text' && shapeData.isMath && shapeData.mathImageData) {
+      try {
+        const mathImage = await createKonvaImageFromData(shapeData.mathImageData, shapeData)
+        if (mathImage) {
+          // Add selection handling
+          if (store.selectedShapes.value.some(s => s.id === shapeData.id)) {
+            mathImage.setAttrs({
+              strokeEnabled: true,
+              stroke: '#0066cc',
+              strokeWidth: 3
+            })
+          }
+          
+          layer?.add(mathImage)
+          continue
+        }
+      } catch (error) {
+        console.warn('Failed to render math image:', error)
+        // Fall through to render as regular text
+      }
     }
     
     let shape: Konva.Shape | null = null
@@ -769,20 +850,33 @@ function redrawCanvas(shapes: Shape[]) {
         let displayText = shapeData.text || 'Double click to edit'
         let fontStyle = 'normal'
         
-        // Handle bullet points
-        if (shapeData.isBullet) {
-          displayText = displayText.split('\n').map(line => 
-            line.trim() ? `• ${line.trim()}` : ''
-          ).join('\n')
-        }
-        
-        // Handle bold and italic
-        if (shapeData.isBold && shapeData.isItalic) {
-          fontStyle = 'bold italic'
-        } else if (shapeData.isBold) {
-          fontStyle = 'bold'
-        } else if (shapeData.isItalic) {
-          fontStyle = 'italic'
+        // Handle math mode fallback (when mathImageData is not available)
+        if (shapeData.isMath) {
+          try {
+            // For math mode without cached image, show a simplified representation
+            const mathPreview = shapeData.text || ''
+            displayText = `📐 ${mathPreview.length > 20 ? mathPreview.substring(0, 17) + '...' : mathPreview}`
+            fontStyle = 'italic'
+          } catch (error) {
+            displayText = '📐 [Invalid Math]'
+            fontStyle = 'italic'
+          }
+        } else {
+          // Handle bullet points
+          if (shapeData.isBullet) {
+            displayText = displayText.split('\n').map(line => 
+              line.trim() ? `• ${line.trim()}` : ''
+            ).join('\n')
+          }
+          
+          // Handle bold and italic
+          if (shapeData.isBold && shapeData.isItalic) {
+            fontStyle = 'bold italic'
+          } else if (shapeData.isBold) {
+            fontStyle = 'bold'
+          } else if (shapeData.isItalic) {
+            fontStyle = 'italic'
+          }
         }
         
         shape = new Konva.Text({
@@ -791,7 +885,7 @@ function redrawCanvas(shapes: Shape[]) {
           y: shapeData.y,
           text: displayText,
           fontSize: shapeData.fontSize || 24,
-          fontFamily: shapeData.fontFamily || 'Arial',
+          fontFamily: shapeData.fontFamily || (shapeData.isMath ? 'KaTeX_Main' : 'Arial'),
           fontStyle: fontStyle,
           fill: shapeData.fill || store.style.value.fill,
           stroke: shapeData.stroke || store.style.value.stroke,
@@ -829,7 +923,7 @@ function redrawCanvas(shapes: Shape[]) {
       
       layer?.add(shape)
     }
-  })
+  }
   
   layer.draw()
 }
@@ -861,7 +955,7 @@ function updateSelection(selectedShapes: Shape[]) {
   layer.draw()
 }
 
-function handleMouseDown(e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) {
+function handleMouseDown(_e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) {
   if (!stage || store.tool.value === 'select') return
   
   isDrawing = true
@@ -929,7 +1023,7 @@ function handleMouseDown(e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) {
   }
 }
 
-function handleMouseMove(e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) {
+async function handleMouseMove(_e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) {
   if (!isDrawing || !currentShape || !stage) return
   
   const pos = stage.getPointerPosition()
@@ -937,7 +1031,7 @@ function handleMouseMove(e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) {
   
   switch (currentShape.type) {
     case 'rectangle':
-      if (currentShape.x !== undefined) {
+      if (currentShape.x !== undefined && currentShape.y !== undefined) {
         currentShape.width = pos.x - currentShape.x
         currentShape.height = pos.y - currentShape.y
       }
@@ -965,7 +1059,7 @@ function handleMouseMove(e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) {
   }
   
   // Temporarily draw current shape
-  redrawWithCurrentShape()
+  await redrawWithCurrentShape()
 }
 
 function handleMouseUp() {
@@ -1000,8 +1094,8 @@ function isValidShape(shape: Partial<Shape>): boolean {
   }
 }
 
-function redrawWithCurrentShape() {
-  redrawCanvas(store.shapes.value)
+async function redrawWithCurrentShape() {
+  await redrawCanvas(store.shapes.value)
   
   if (currentShape && layer) {
     let tempShape: Konva.Shape | null = null
@@ -1095,8 +1189,20 @@ const selectedTextFontFamily = computed(() => {
 const formattedPreview = computed(() => {
   let text = editingText.value
   
+  // Handle math mode first
+  if (currentFormat.value.isMath) {
+    try {
+      return katex.renderToString(text, {
+        displayMode: currentFormat.value.mathDisplayMode,
+        throwOnError: false
+      })
+    } catch (error: any) {
+      return `<div class="math-error">Invalid LaTeX: ${error?.message || 'Unknown error'}</div>`
+    }
+  }
+  
   if (currentFormat.value.isBullet) {
-    text = text.split('\n').map(line => line.trim() ? `• ${line}` : '').join('\n')
+    text = text.split('\n').map((line: string) => line.trim() ? `• ${line}` : '').join('\n')
   }
   
   if (currentFormat.value.isBold) {
@@ -1126,6 +1232,224 @@ const previewStyle = computed(() => {
   }
 })
 
+// Math rendering functions
+async function renderMathToImageData(text: string, displayMode: boolean = true): Promise<string | null> {
+  try {
+    // Create a temporary container element
+    const tempDiv = document.createElement('div')
+    tempDiv.style.position = 'absolute'
+    tempDiv.style.left = '-9999px'
+    tempDiv.style.top = '-9999px'
+    tempDiv.style.visibility = 'hidden'
+    tempDiv.style.background = 'white'
+    tempDiv.style.padding = '10px'
+    tempDiv.style.fontFamily = 'KaTeX_Main, Times New Roman, serif'
+    tempDiv.style.fontSize = displayMode ? '24px' : '18px'
+    tempDiv.style.color = '#333'
+    
+    // Render KaTeX to the container
+    const mathHtml = katex.renderToString(text, {
+      displayMode,
+      throwOnError: false
+    })
+    
+    tempDiv.innerHTML = mathHtml
+    document.body.appendChild(tempDiv)
+    
+    // Wait for fonts to load
+    await new Promise(resolve => setTimeout(resolve, 100))
+    
+    // Get the rendered dimensions
+    const rect = tempDiv.getBoundingClientRect()
+    const width = Math.max(rect.width + 20, 50) // Add padding
+    const height = Math.max(rect.height + 20, 30) // Add padding
+    
+    // Create canvas for manual rendering
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      document.body.removeChild(tempDiv)
+      return null
+    }
+    
+    // Set canvas size with device pixel ratio for crisp rendering
+    const dpr = window.devicePixelRatio || 1
+    canvas.width = width * dpr
+    canvas.height = height * dpr
+    canvas.style.width = `${width}px`
+    canvas.style.height = `${height}px`
+    ctx.scale(dpr, dpr)
+    
+    // Set white background
+    ctx.fillStyle = 'white'
+    ctx.fillRect(0, 0, width, height)
+    
+    // Render text using a simple approach that avoids CORS issues
+    ctx.fillStyle = '#333'
+    ctx.font = `${displayMode ? '24' : '18'}px KaTeX_Main, Times New Roman, serif`
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'top'
+    
+    // For complex math, we'll render a simplified version
+    const simplifiedText = renderSimplifiedMath(text, displayMode)
+    const lines = simplifiedText.split('\n')
+    const lineHeight = displayMode ? 32 : 24
+    
+    lines.forEach((line, index) => {
+      ctx.fillText(line, 10, 10 + (index * lineHeight))
+    })
+    
+    // Clean up
+    document.body.removeChild(tempDiv)
+    
+    // Return canvas as data URL
+    return canvas.toDataURL('image/png')
+    
+  } catch (error) {
+    console.warn('Failed to render math to image:', error)
+    return null
+  }
+}
+
+// Helper function to render simplified math notation
+function renderSimplifiedMath(latex: string, displayMode: boolean): string {
+  try {
+    // Simple LaTeX to Unicode/text conversion for canvas rendering
+    let text = latex
+    
+    // Common LaTeX symbols to Unicode
+    const replacements: Record<string, string> = {
+      '\\alpha': 'α',
+      '\\beta': 'β',
+      '\\gamma': 'γ',
+      '\\delta': 'δ',
+      '\\epsilon': 'ε',
+      '\\theta': 'θ',
+      '\\lambda': 'λ',
+      '\\mu': 'μ',
+      '\\pi': 'π',
+      '\\sigma': 'σ',
+      '\\phi': 'φ',
+      '\\omega': 'ω',
+      '\\sum': 'Σ',
+      '\\int': '∫',
+      '\\infty': '∞',
+      '\\pm': '±',
+      '\\times': '×',
+      '\\div': '÷',
+      '\\le': '≤',
+      '\\ge': '≥',
+      '\\ne': '≠',
+      '\\approx': '≈',
+      '\\in': '∈',
+      '\\subset': '⊂',
+      '\\cup': '∪',
+      '\\cap': '∩',
+      '\\sqrt': '√',
+    }
+    
+    // Apply replacements
+    for (const [latex, unicode] of Object.entries(replacements)) {
+      text = text.replace(new RegExp(latex.replace(/\\/g, '\\\\'), 'g'), unicode)
+    }
+    
+    // Handle fractions - simplified representation
+    text = text.replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g, '($1)/($2)')
+    
+    // Handle superscripts and subscripts - simplified
+    text = text.replace(/\^(\{[^}]+\}|\w)/g, (_match, content) => {
+      const clean = content.replace(/[{}]/g, '')
+      return `^${clean}`
+    })
+    text = text.replace(/_(\{[^}]+\}|\w)/g, (_match, content) => {
+      const clean = content.replace(/[{}]/g, '')
+      return `_${clean}`
+    })
+    
+    // Remove remaining LaTeX commands
+    text = text.replace(/\\[a-zA-Z]+/g, '')
+    text = text.replace(/[{}]/g, '')
+    
+    // Clean up extra spaces
+    text = text.replace(/\s+/g, ' ').trim()
+    
+    if (displayMode && text.length > 40) {
+      // Break long expressions into multiple lines for display mode
+      const words = text.split(' ')
+      const lines: string[] = []
+      let currentLine = ''
+      
+      for (const word of words) {
+        if (currentLine.length + word.length > 40) {
+          lines.push(currentLine.trim())
+          currentLine = word + ' '
+        } else {
+          currentLine += word + ' '
+        }
+      }
+      if (currentLine.trim()) {
+        lines.push(currentLine.trim())
+      }
+      
+      return lines.join('\n')
+    }
+    
+    return text
+    
+  } catch (error) {
+    return `Math: ${latex}`
+  }
+}
+
+async function createKonvaImageFromData(dataURL: string, shapeData: Shape): Promise<Konva.Image | null> {
+  try {
+    const image = new Image()
+    
+    return new Promise((resolve) => {
+      image.onload = () => {
+        const konvaImage = new Konva.Image({
+          id: shapeData.id,
+          x: shapeData.x,
+          y: shapeData.y,
+          image: image,
+          draggable: store.tool.value === 'select'
+        })
+        
+        // Add click handlers
+        konvaImage.on('click', () => {
+          if (store.tool.value === 'select') {
+            store.selectShapes([shapeData.id])
+          }
+        })
+        
+        konvaImage.on('dblclick', () => {
+          editText(shapeData)
+        })
+        
+        konvaImage.on('dragend', (e) => {
+          store.updateShape(shapeData.id, {
+            x: e.target.x(),
+            y: e.target.y()
+          })
+        })
+        
+        resolve(konvaImage)
+      }
+      
+      image.onerror = () => {
+        console.warn('Failed to load math image')
+        resolve(null)
+      }
+      
+      image.src = dataURL
+    })
+    
+  } catch (error) {
+    console.warn('Failed to create Konva image:', error)
+    return null
+  }
+}
+
 // Rich text editor functions
 function editText(shapeData: Shape) {
   if (shapeData.type !== 'text') return
@@ -1138,7 +1462,9 @@ function editText(shapeData: Shape) {
     isBold: shapeData.isBold || false,
     isItalic: shapeData.isItalic || false,
     isStrikethrough: shapeData.isStrikethrough || false,
-    isBullet: shapeData.isBullet || false
+    isBullet: shapeData.isBullet || false,
+    isMath: shapeData.isMath || false,
+    mathDisplayMode: shapeData.mathDisplayMode !== false // Default to true if not set
   }
   
   showRichTextEditor.value = true
@@ -1152,11 +1478,13 @@ function closeRichTextEditor() {
     isBold: false,
     isItalic: false,
     isStrikethrough: false,
-    isBullet: false
+    isBullet: false,
+    isMath: false,
+    mathDisplayMode: true
   }
 }
 
-function toggleFormat(formatType: 'bold' | 'italic' | 'strikethrough' | 'bullet') {
+function toggleFormat(formatType: 'bold' | 'italic' | 'strikethrough' | 'bullet' | 'math') {
   switch (formatType) {
     case 'bold':
       currentFormat.value.isBold = !currentFormat.value.isBold
@@ -1170,6 +1498,18 @@ function toggleFormat(formatType: 'bold' | 'italic' | 'strikethrough' | 'bullet'
     case 'bullet':
       currentFormat.value.isBullet = !currentFormat.value.isBullet
       break
+    case 'math':
+      currentFormat.value.isMath = !currentFormat.value.isMath
+      // Clear other formatting when switching to/from math mode
+      if (currentFormat.value.isMath) {
+        currentFormat.value.isBold = false
+        currentFormat.value.isItalic = false
+        currentFormat.value.isStrikethrough = false
+        currentFormat.value.isBullet = false
+        // Reset to display mode when enabling math
+        currentFormat.value.mathDisplayMode = true
+      }
+      break
   }
 }
 
@@ -1178,16 +1518,36 @@ function updatePreview() {
   // The preview is automatically updated via computed property
 }
 
-function applyTextChanges() {
+async function applyTextChanges() {
   if (!editingShapeId.value) return
   
-  const updates: Partial<Shape> = {
+  let updates: Partial<Shape> = {
     text: editingText.value,
     isBold: currentFormat.value.isBold,
     isItalic: currentFormat.value.isItalic,
     isStrikethrough: currentFormat.value.isStrikethrough,
     isBullet: currentFormat.value.isBullet,
+    isMath: currentFormat.value.isMath,
+    mathDisplayMode: currentFormat.value.mathDisplayMode,
     htmlContent: formattedPreview.value
+  }
+  
+  // If it's math mode, render to image
+  if (currentFormat.value.isMath && editingText.value.trim()) {
+    try {
+      const mathImageData = await renderMathToImageData(
+        editingText.value,
+        currentFormat.value.mathDisplayMode
+      )
+      if (mathImageData) {
+        updates.mathImageData = mathImageData
+      }
+    } catch (error) {
+      console.warn('Failed to render math image:', error)
+    }
+  } else {
+    // Clear math image data for non-math text
+    updates.mathImageData = undefined
   }
   
   store.updateShape(editingShapeId.value, updates)
@@ -1196,7 +1556,7 @@ function applyTextChanges() {
 
 // Slides management functions
 function addNewSlide() {
-  const newSlideId = slidesStore.addSlide()
+  slidesStore.addSlide()
   slidesStore.goToSlide(slidesStore.slides.value.length - 1)
   syncCurrentSlideShapes()
 }
@@ -1341,10 +1701,10 @@ function closeAIModal() {
   aiRequest.value = {
     topic: '',
     slideCount: 1,
-    style: 'professional',
+    style: 'professional' as 'professional' | 'creative' | 'minimal' | 'academic',
     language: 'en',
     includeImages: true,
-    generationMode: 'replace'
+    generationMode: 'replace' as 'replace' | 'append' | 'insert'
   }
 }
 
@@ -1358,13 +1718,13 @@ async function generateSlides() {
       closeAIModal()
       
       // Show success notification based on generation mode
-      const modeMessage = {
+      const modeMessage: Record<string, string> = {
         replace: `Successfully replaced with ${result.slidesGenerated} AI-generated slides!`,
         append: `Successfully added ${result.slidesGenerated} slides to the end. Total: ${result.totalSlides} slides.`,
         insert: `Successfully inserted ${result.slidesGenerated} slides after current slide. Total: ${result.totalSlides} slides.`
       }
       
-      console.log(modeMessage[result.mode] || `Successfully generated ${result.slidesGenerated} slides!`)
+      console.log(modeMessage[result.mode || ''] || `Successfully generated ${result.slidesGenerated} slides!`)
     } else {
       console.error('Failed to generate slides:', result.error)
       // You could show an error toast here
@@ -1424,13 +1784,6 @@ function saveSettings() {
   console.log('API settings saved successfully!')
 }
 
-// Initialize settings modal with current values
-function openSettingsModal() {
-  const currentProvider = slidesStore.aiService.providers.value.find(p => p.name === 'OpenRouter')
-  tempApiKey.value = currentProvider?.apiKey || ''
-  tempModel.value = currentProvider?.model || 'deepseek/deepseek-chat:free'
-  showSettingsModal.value = true
-}
 </script>
 
 <style scoped>
@@ -2780,5 +3133,101 @@ input[type="range"] {
 .radio-label:has(.radio-input:disabled) .radio-text strong,
 .radio-label:has(.radio-input:disabled) .radio-text small {
   color: #9ca3af;
+}
+
+/* Math Help Styles */
+.math-help {
+  margin-top: 16px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.math-help details {
+  cursor: pointer;
+}
+
+.math-help summary {
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 12px;
+  outline: none;
+  user-select: none;
+}
+
+.math-help summary::-webkit-details-marker {
+  color: #a855f7;
+}
+
+.math-examples {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.example {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: white;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+  font-size: 13px;
+  color: #4b5563;
+}
+
+.example code {
+  background: #f1f5f9;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-family: 'SF Mono', 'Monaco', monospace;
+  color: #1e293b;
+  border: 1px solid #e2e8f0;
+  min-width: 120px;
+}
+
+/* Math Error Styles */
+.math-error {
+  color: #dc2626;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  padding: 12px;
+  font-size: 14px;
+  font-family: monospace;
+}
+
+/* Math Mode Toggle Styles */
+.math-mode-toggle {
+  display: flex;
+  gap: 4px;
+  margin-left: 8px;
+  padding: 4px;
+  background: #f8f9fa;
+  border-radius: 6px;
+  border: 1px solid #e9ecef;
+}
+
+.mini-btn {
+  padding: 6px 10px !important;
+  font-size: 12px !important;
+  min-width: unset !important;
+  font-weight: 600;
+  font-family: 'Times New Roman', serif;
+}
+
+.mini-btn:first-child {
+  font-size: 14px !important;
+  font-weight: bold;
+}
+
+.mini-btn.active {
+  background: #a855f7 !important;
+  color: white !important;
+  border-color: #a855f7 !important;
+  box-shadow: 0 2px 4px rgba(168, 85, 247, 0.3) !important;
 }
 </style> 
