@@ -316,13 +316,17 @@
         </div>
 
         <div class="text-editor">
-          <textarea 
-            ref="textAreaRef"
-            v-model="editingText"
-            :placeholder="currentFormat.isMath ? (currentFormat.mathDisplayMode ? 'Enter LaTeX math expression... e.g., x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}' : 'Enter inline LaTeX... e.g., \\alpha + \\beta = \\gamma') : 'Enter your text...'"
-            rows="6"
-            @input="updatePreview"
-          ></textarea>
+          <div 
+            ref="richTextEditor"
+            contenteditable="true"
+            class="rich-text-input"
+            :class="{ 'math-mode': currentFormat.isMath }"
+            @input="handleRichTextInput"
+            @keydown="handleRichTextKeydown"
+            @mouseup="updateSelectionFormat"
+            @keyup="updateSelectionFormat"
+            :data-placeholder="currentFormat.isMath ? (currentFormat.mathDisplayMode ? 'Enter LaTeX math expression... e.g., x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}' : 'Enter inline LaTeX... e.g., \\alpha + \\beta = \\gamma') : 'Enter your text...'"
+          ></div>
           <div v-if="currentFormat.isMath" class="math-help">
             <details>
               <summary>LaTeX Math Examples</summary>
@@ -665,8 +669,10 @@ let currentShape: Partial<Shape> | null = null
 // Rich text editor state
 const showRichTextEditor = ref(false)
 const editingText = ref('')
+const editingHtml = ref('')
 const editingShapeId = ref<string | null>(null)
-const textAreaRef = ref<HTMLTextAreaElement | null>(null)
+const richTextEditor = ref<HTMLDivElement | null>(null)
+const currentSelection = ref<Selection | null>(null)
 
 const currentFormat = ref({
   isBold: false,
@@ -778,6 +784,29 @@ async function redrawCanvas(shapes: Shape[]) {
         }
       } catch (error) {
         console.warn('Failed to render math image:', error)
+        // Fall through to render as regular text
+      }
+    }
+    
+    // Handle rich text SVG
+    if (shapeData.type === 'text' && !shapeData.isMath && shapeData.richTextSvg) {
+      try {
+        const richTextImage = await createKonvaImageFromData(shapeData.richTextSvg, shapeData)
+        if (richTextImage) {
+          // Add selection handling
+          if (store.selectedShapes.value.some(s => s.id === shapeData.id)) {
+            richTextImage.setAttrs({
+              strokeEnabled: true,
+              stroke: '#0066cc',
+              strokeWidth: 3
+            })
+          }
+          
+          layer?.add(richTextImage)
+          continue
+        }
+      } catch (error) {
+        console.warn('Failed to render rich text SVG:', error)
         // Fall through to render as regular text
       }
     }
@@ -1187,12 +1216,10 @@ const selectedTextFontFamily = computed(() => {
 
 // Rich text editor computed properties
 const formattedPreview = computed(() => {
-  let text = editingText.value
-  
   // Handle math mode first
   if (currentFormat.value.isMath) {
     try {
-      return katex.renderToString(text, {
+      return katex.renderToString(editingText.value, {
         displayMode: currentFormat.value.mathDisplayMode,
         throwOnError: false
       })
@@ -1200,6 +1227,14 @@ const formattedPreview = computed(() => {
       return `<div class="math-error">Invalid LaTeX: ${error?.message || 'Unknown error'}</div>`
     }
   }
+  
+  // For rich text mode, return the HTML content directly
+  if (editingHtml.value) {
+    return editingHtml.value
+  }
+  
+  // Fallback to plain text formatting
+  let text = editingText.value
   
   if (currentFormat.value.isBullet) {
     text = text.split('\n').map((line: string) => line.trim() ? `• ${line}` : '').join('\n')
@@ -1467,6 +1502,24 @@ function editText(shapeData: Shape) {
     mathDisplayMode: shapeData.mathDisplayMode !== false // Default to true if not set
   }
   
+  // Restore rich text content if available
+  if (shapeData.richTextHtml && !shapeData.isMath) {
+    editingHtml.value = shapeData.richTextHtml
+    // Set rich text editor content after the modal opens
+    setTimeout(() => {
+      parseHtmlToRichText(shapeData.richTextHtml || '')
+    }, 50)
+  } else {
+    editingHtml.value = ''
+    // For plain text or math mode, clear rich text editor
+    setTimeout(() => {
+      if (richTextEditor.value) {
+        richTextEditor.value.innerHTML = currentFormat.value.isMath ? '' : (editingText.value || 'Double click to edit')
+        editingHtml.value = richTextEditor.value.innerHTML
+      }
+    }, 50)
+  }
+  
   showRichTextEditor.value = true
 }
 
@@ -1485,18 +1538,33 @@ function closeRichTextEditor() {
 }
 
 function toggleFormat(formatType: 'bold' | 'italic' | 'strikethrough' | 'bullet' | 'math') {
+  // Check if we have a text selection for individual formatting
+  const selection = window.getSelection()
+  const hasSelection = selection && !selection.isCollapsed && selection.toString().length > 0
+  
+  if (hasSelection && formatType !== 'math' && formatType !== 'bullet') {
+    // Apply formatting to selection only
+    toggleSelectionFormat(formatType)
+    return
+  }
+  
+  // Apply global formatting
   switch (formatType) {
     case 'bold':
       currentFormat.value.isBold = !currentFormat.value.isBold
+      if (currentFormat.value.isBold) applyGlobalFormat('bold')
       break
     case 'italic':
       currentFormat.value.isItalic = !currentFormat.value.isItalic
+      if (currentFormat.value.isItalic) applyGlobalFormat('italic')
       break
     case 'strikethrough':
       currentFormat.value.isStrikethrough = !currentFormat.value.isStrikethrough
+      if (currentFormat.value.isStrikethrough) applyGlobalFormat('strikethrough')
       break
     case 'bullet':
       currentFormat.value.isBullet = !currentFormat.value.isBullet
+      applyGlobalFormat('bullet')
       break
     case 'math':
       currentFormat.value.isMath = !currentFormat.value.isMath
@@ -1508,6 +1576,17 @@ function toggleFormat(formatType: 'bold' | 'italic' | 'strikethrough' | 'bullet'
         currentFormat.value.isBullet = false
         // Reset to display mode when enabling math
         currentFormat.value.mathDisplayMode = true
+        // Clear rich text editor content for math mode
+        if (richTextEditor.value) {
+          richTextEditor.value.innerHTML = ''
+          editingText.value = ''
+          editingHtml.value = ''
+        }
+      } else {
+        // Restore rich text editor when leaving math mode
+        if (richTextEditor.value && editingHtml.value) {
+          richTextEditor.value.innerHTML = editingHtml.value
+        }
       }
       break
   }
@@ -1516,6 +1595,243 @@ function toggleFormat(formatType: 'bold' | 'italic' | 'strikethrough' | 'bullet'
 function updatePreview() {
   // This function is called when text changes
   // The preview is automatically updated via computed property
+}
+
+// Rich text editor functions
+function handleRichTextInput(event: Event) {
+  const target = event.target as HTMLDivElement
+  editingHtml.value = target.innerHTML
+  editingText.value = target.textContent || ''
+  updatePreview()
+}
+
+function handleRichTextKeydown(event: KeyboardEvent) {
+  // Handle keyboard shortcuts for formatting
+  if ((event.metaKey || event.ctrlKey)) {
+    switch (event.key.toLowerCase()) {
+      case 'b':
+        event.preventDefault()
+        toggleSelectionFormat('bold')
+        break
+      case 'i':
+        event.preventDefault()
+        toggleSelectionFormat('italic')
+        break
+      case 'u':
+        event.preventDefault()
+        toggleSelectionFormat('strikethrough')
+        break
+    }
+  }
+  
+  // Handle enter key for bullet points
+  if (event.key === 'Enter' && currentFormat.value.isBullet) {
+    event.preventDefault()
+    insertBulletPoint()
+  }
+}
+
+function updateSelectionFormat() {
+  const selection = window.getSelection()
+  currentSelection.value = selection
+  
+  if (!selection || selection.rangeCount === 0) return
+  
+  const range = selection.getRangeAt(0)
+  const commonAncestor = range.commonAncestorContainer
+  let element = commonAncestor.nodeType === Node.TEXT_NODE ? 
+    commonAncestor.parentElement : commonAncestor as Element
+  
+  // Walk up the DOM tree to check for formatting
+  const formats = {
+    isBold: false,
+    isItalic: false,
+    isStrikethrough: false
+  }
+  
+  while (element && element !== richTextEditor.value) {
+    if (element.tagName === 'STRONG' || element.tagName === 'B') {
+      formats.isBold = true
+    }
+    if (element.tagName === 'EM' || element.tagName === 'I') {
+      formats.isItalic = true
+    }
+    if (element.tagName === 'S' || element.tagName === 'STRIKE') {
+      formats.isStrikethrough = true
+    }
+    element = element.parentElement
+  }
+  
+  // Update current format for toolbar display (but don't override global settings)
+  if (selection.toString().length > 0) {
+    Object.assign(currentFormat.value, formats)
+  }
+}
+
+function toggleSelectionFormat(formatType: 'bold' | 'italic' | 'strikethrough') {
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0) return
+  
+  const range = selection.getRangeAt(0)
+  if (range.collapsed) return // No text selected
+  
+  let command = ''
+  switch (formatType) {
+    case 'bold':
+      command = 'bold'
+      break
+    case 'italic':
+      command = 'italic'
+      break
+    case 'strikethrough':
+      command = 'strikeThrough'
+      break
+  }
+  
+  if (command) {
+    document.execCommand(command, false)
+    handleRichTextInput({ target: richTextEditor.value } as any)
+    updateSelectionFormat()
+  }
+}
+
+function insertBulletPoint() {
+  const selection = window.getSelection()
+  if (!selection || !richTextEditor.value) return
+  
+  const range = selection.getRangeAt(0)
+  
+  // Create a new line with bullet
+  const br = document.createElement('br')
+  const textNode = document.createTextNode('• ')
+  
+  range.deleteContents()
+  range.insertNode(br)
+  range.insertNode(textNode)
+  
+  // Move cursor after the bullet
+  range.setStartAfter(textNode)
+  range.setEndAfter(textNode)
+  selection.removeAllRanges()
+  selection.addRange(range)
+  
+  handleRichTextInput({ target: richTextEditor.value } as any)
+}
+
+function applyGlobalFormat(formatType: 'bold' | 'italic' | 'strikethrough' | 'bullet' | 'math') {
+  if (!richTextEditor.value) return
+  
+  // Select all text
+  const range = document.createRange()
+  range.selectNodeContents(richTextEditor.value)
+  const selection = window.getSelection()
+  selection?.removeAllRanges()
+  selection?.addRange(range)
+  
+  // Apply the format based on type
+  switch (formatType) {
+    case 'bold':
+    case 'italic':
+    case 'strikethrough':
+      toggleSelectionFormat(formatType)
+      break
+    case 'bullet':
+      if (currentFormat.value.isBullet) {
+        // Add bullets to each line
+        const content = richTextEditor.value.textContent || ''
+        const lines = content.split('\n').map(line => 
+          line.trim() ? `• ${line.trim()}` : ''
+        )
+        richTextEditor.value.innerHTML = lines.join('<br>')
+      }
+      break
+    case 'math':
+      // Math formatting is handled separately
+      break
+  }
+  
+  // Clear selection
+  selection?.removeAllRanges()
+  handleRichTextInput({ target: richTextEditor.value } as any)
+}
+
+// SVG generation functions
+async function generateSvgFromRichText(htmlContent: string, style: any): Promise<string> {
+  return new Promise((resolve, reject) => {
+    try {
+      // Create a temporary container to measure text
+      const tempDiv = document.createElement('div')
+      tempDiv.style.position = 'absolute'
+      tempDiv.style.left = '-9999px'
+      tempDiv.style.top = '-9999px'
+      tempDiv.style.visibility = 'hidden'
+      tempDiv.style.fontSize = `${style.fontSize || 24}px`
+      tempDiv.style.fontFamily = style.fontFamily || 'Arial'
+      tempDiv.style.color = style.fill || '#000000'
+      tempDiv.style.lineHeight = '1.4'
+      tempDiv.style.whiteSpace = 'pre-wrap'
+      tempDiv.innerHTML = htmlContent
+      
+      document.body.appendChild(tempDiv)
+      
+      // Get dimensions
+      const rect = tempDiv.getBoundingClientRect()
+      const width = Math.max(rect.width + 40, 100)
+      const height = Math.max(rect.height + 40, 50)
+      
+      // Create SVG with proper namespace
+      const svgNS = 'http://www.w3.org/2000/svg'
+      const svg = document.createElementNS(svgNS, 'svg')
+      svg.setAttribute('width', width.toString())
+      svg.setAttribute('height', height.toString())
+      svg.setAttribute('xmlns', svgNS)
+      
+      // Create a foreignObject to contain the HTML content
+      const foreignObject = document.createElementNS(svgNS, 'foreignObject')
+      foreignObject.setAttribute('x', '20')
+      foreignObject.setAttribute('y', '20')
+      foreignObject.setAttribute('width', (width - 40).toString())
+      foreignObject.setAttribute('height', (height - 40).toString())
+      
+      // Create div with styles for the content
+      const contentDiv = document.createElement('div')
+      contentDiv.style.fontSize = `${style.fontSize || 24}px`
+      contentDiv.style.fontFamily = style.fontFamily || 'Arial'
+      contentDiv.style.color = style.fill || '#000000'
+      contentDiv.style.lineHeight = '1.4'
+      contentDiv.style.margin = '0'
+      contentDiv.style.padding = '0'
+      contentDiv.innerHTML = htmlContent
+      
+      foreignObject.appendChild(contentDiv)
+      svg.appendChild(foreignObject)
+      
+      // Convert SVG to string
+      const serializer = new XMLSerializer()
+      const svgString = serializer.serializeToString(svg)
+      
+      // Clean up
+      document.body.removeChild(tempDiv)
+      
+      resolve(svgString)
+    } catch (error) {
+      reject(error)
+    }
+  })
+}
+
+function convertSvgToDataUrl(svgString: string): string {
+  const base64 = btoa(unescape(encodeURIComponent(svgString)))
+  return `data:image/svg+xml;base64,${base64}`
+}
+
+function parseHtmlToRichText(htmlContent: string): void {
+  if (!richTextEditor.value) return
+  
+  // Set the HTML content directly to the rich text editor
+  richTextEditor.value.innerHTML = htmlContent
+  editingHtml.value = htmlContent
+  editingText.value = richTextEditor.value.textContent || ''
 }
 
 async function applyTextChanges() {
@@ -1529,7 +1845,8 @@ async function applyTextChanges() {
     isBullet: currentFormat.value.isBullet,
     isMath: currentFormat.value.isMath,
     mathDisplayMode: currentFormat.value.mathDisplayMode,
-    htmlContent: formattedPreview.value
+    htmlContent: currentFormat.value.isMath ? formattedPreview.value : editingHtml.value,
+    richTextHtml: editingHtml.value // Store the rich HTML content
   }
   
   // If it's math mode, render to image
@@ -1545,9 +1862,26 @@ async function applyTextChanges() {
     } catch (error) {
       console.warn('Failed to render math image:', error)
     }
+  } else if (!currentFormat.value.isMath && editingHtml.value.trim()) {
+    // Generate SVG for rich text content
+    try {
+      const selectedShape = store.shapes.value.find(s => s.id === editingShapeId.value)
+      const style = {
+        fontSize: selectedShape?.fontSize || 24,
+        fontFamily: selectedShape?.fontFamily || 'Arial',
+        fill: selectedShape?.fill || store.style.value.fill
+      }
+      
+      const svgString = await generateSvgFromRichText(editingHtml.value, style)
+      const svgDataUrl = convertSvgToDataUrl(svgString)
+      updates.richTextSvg = svgDataUrl
+    } catch (error) {
+      console.warn('Failed to generate SVG from rich text:', error)
+    }
   } else {
-    // Clear math image data for non-math text
+    // Clear image data for empty text
     updates.mathImageData = undefined
+    updates.richTextSvg = undefined
   }
   
   store.updateShape(editingShapeId.value, updates)
@@ -2394,6 +2728,75 @@ input[type="range"] {
   outline: none;
   border-color: #a855f7;
   box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.15);
+}
+
+/* Rich Text Editor Styles */
+.rich-text-input {
+  width: 100%;
+  border: 1px solid #dee2e6;
+  border-radius: 8px;
+  padding: 16px;
+  font-size: 14px;
+  font-family: inherit;
+  min-height: 120px;
+  line-height: 1.5;
+  color: #495057;
+  transition: border-color 0.2s ease;
+  background: white;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.rich-text-input:focus {
+  outline: none;
+  border-color: #a855f7;
+  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.15);
+}
+
+.rich-text-input:empty:before {
+  content: attr(data-placeholder);
+  color: #adb5bd;
+  font-style: italic;
+  pointer-events: none;
+}
+
+.rich-text-input.math-mode {
+  font-family: 'Courier New', 'Monaco', monospace;
+  background: #f8f9fa;
+}
+
+.rich-text-input.math-mode:empty:before {
+  color: #6c757d;
+}
+
+/* Rich text formatting */
+.rich-text-input strong,
+.rich-text-input b {
+  font-weight: bold;
+}
+
+.rich-text-input em,
+.rich-text-input i {
+  font-style: italic;
+}
+
+.rich-text-input s {
+  text-decoration: line-through;
+}
+
+.rich-text-input ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.rich-text-input li {
+  margin: 4px 0;
+}
+
+/* Selection highlighting */
+.rich-text-input ::selection {
+  background: rgba(168, 85, 247, 0.2);
 }
 
 .text-preview {

@@ -39,6 +39,8 @@ export interface Shape {
   mathDisplayMode?: boolean
   mathImageData?: string
   htmlContent?: string
+  richTextHtml?: string
+  richTextSvg?: string
 }
 
 export interface CanvasState {
