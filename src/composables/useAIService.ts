@@ -1,4 +1,4 @@
-import { ref, type Ref } from 'vue'
+import { ref } from 'vue'
 import type { Shape } from './useCanvasStore'
 
 export interface AIProvider {
@@ -202,7 +202,7 @@ Create slides that tell a complete story about ${request.topic}. Make each slide
   }
 
   // Generate shapes from AI content
-  function generateShapesFromContent(content: GeneratedSlideContent, slideWidth = 800, slideHeight = 600): Shape[] {
+  function generateShapesFromContent(content: GeneratedSlideContent): Shape[] {
     const shapes: Shape[] = []
     let yOffset = 60
 
